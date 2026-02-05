@@ -1,2 +1,2 @@
 # Mini-social-media-analysis
-Using Sql
+Using  Sql
