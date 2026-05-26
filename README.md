@@ -1,9 +1,9 @@
-"""
+
 Social Media Analytics Backend — Demo Runner
 =============================================
 Tüm servisleri mock veriyle çalıştırır ve çıktıları gösterir.
 Gerçek PostgreSQL bağlantısı olmadan da mantığı inceleyebilirsiniz.
-"""
+
 
 import json
 import logging
