@@ -1,0 +1,3 @@
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
+pgvector>=0.2.0

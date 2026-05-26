@@ -1,0 +1,484 @@
+# 📊 Social Media Analytics Backend
+
+> **AI Engineer odaklı**, üretim kalitesinde sosyal medya analitik altyapısı.  
+> PostgreSQL + SQLAlchemy ORM + Katmanlı servis mimarisi ile inşa edilmiştir.
+
+---
+
+## 🗂️ İçindekiler
+
+- [Proje Hakkında](#-proje-hakkında)
+- [Proje Yapısı](#-proje-yapısı)
+- [Dosya Açıklamaları](#-dosya-açıklamaları)
+- [Veritabanı Şeması](#-veritabanı-şeması)
+- [Kurulum](#-kurulum)
+- [Kullanım](#-kullanım)
+- [Servisler](#-servisler)
+- [ML Entegrasyonu](#-ml-entegrasyonu)
+- [Teknolojiler](#-teknolojiler)
+
+---
+
+## 🎯 Proje Hakkında
+
+Bu proje, sosyal medya platformlarının arka tarafında çalışan **analitik ve öneri sistemi altyapısını** sıfırdan tasarlamak amacıyla geliştirilmiştir. Standart bir CRUD backend'in ötesine geçerek şu alanlara odaklanır:
+
+- **Recommendation Engine** — User-based CF (Pearson), Item-based CF (Cosine), Content-based Filtering, Hybrid ve Cold Start stratejileri
+- **Analitik** — Günlük engagement analizi, rolling window, cohort retention, churn tespiti, network etki skoru
+- **ML Hazırlığı** — Feature store sorguları, embedding kolonları (`pgvector`), user-item matrisi, `Precision@K` metriği
+- **A/B Test & Model Monitoring** — CTR karşılaştırması, istatistiksel anlamlılık (z-testi), batch pipeline
+
+### Neden Bu Proje?
+
+Çoğu SQL/Python eğitimi temel CRUD örneklerinde kalır. Bu proje şunları bir arada gösterir:
+
+| Katman | Kapsam |
+|--------|--------|
+| SQL | Window functions, CTE, Pearson korelasyonu, cohort analizi, IVFFlat index, Partial index |
+| Python | SQLAlchemy 2.0 ORM, Repository pattern, Service layer, dataclass'lar |
+| ML | Collaborative filtering, content-based filtering, hybrid öneri, embedding benzerliği |
+| DevOps | Batch pipeline, model versiyonlama, A/B test istatistiği |
+
+---
+
+## 📁 Proje Yapısı
+
+```
+social_media_analytics/
+│
+├── core/
+│   ├── config.py           # Yapılandırma dataclass'ları
+│   └── database.py         # SQLAlchemy engine & session yönetimi
+│
+├── models/
+│   └── orm.py              # 8 adet SQLAlchemy ORM modeli
+│
+├── repositories/
+│   └── repo.py             # Veritabanı erişim katmanı (5 repository)
+│
+├── services/
+│   ├── recommendation.py   # Öneri motoru (CF + CBF + Hybrid + Cold Start)
+│   ├── analytics.py        # Engagement, cohort, churn, network analizi
+│   └── ab_test.py          # A/B test & model monitoring
+│
+├── main.py                 # Mock veriyle çalışan demo runner
+└── requirements.txt        # Python bağımlılıkları
+```
+
+---
+
+## 📄 Dosya Açıklamaları
+
+### `core/config.py`
+Tüm yapılandırmaları `dataclass` olarak tutar. Üç ana config sınıfı içerir:
+
+- **`DatabaseConfig`** — PostgreSQL bağlantı bilgileri, pool ayarları. `from_env()` metodu ile `.env` dosyasından otomatik okur.
+- **`RecommendationConfig`** — CF parametreleri (komşu sayısı, minimum ortak etkileşim), hybrid ağırlıklar, sinyal ağırlıkları, cold start ayarları.
+- **`AnalyticsConfig`** — Rolling window, cohort eşikleri, network analizi ağırlıkları.
+
+---
+
+### `core/database.py`
+SQLAlchemy engine ve session yönetimini kapsüller.
+
+- **`Database` sınıfı** — `QueuePool` ile connection pooling, `pool_pre_ping=True` ile kopuk bağlantı tespiti.
+- **`session()` context manager** — `with db.session() as s:` kullanımı; hata durumunda otomatik rollback.
+- **`health_check()`** — Bağlantı canlılık testi.
+
+---
+
+### `models/orm.py`
+SQLAlchemy 2.0 `mapped_column` syntax ile yazılmış 8 ORM modeli:
+
+| Model | Tablo | Açıklama |
+|-------|-------|----------|
+| `User` | `users` | Kullanıcı profili + `VECTOR(384)` embedding |
+| `Post` | `posts` | İçerik + virality/sentiment skoru + içerik embedding |
+| `Follow` | `follows` | Takip ilişkisi + `interaction_weight` (GNN edge feature) |
+| `Interaction` | `interactions` | Etkileşimler + `dwell_time_ms` + `scroll_depth` |
+| `Hashtag` | `hashtags` | Hashtag + `trend_score` |
+| `PostHashtag` | `post_hashtags` | M:N köprü tablo |
+| `UserSession` | `user_sessions` | Oturum verisi (churn modeli için) |
+| `Recommendation` | `recommendations` | Model çıktıları + `was_clicked` feedback |
+
+Her model ilgili index tanımlarını `__table_args__` içinde barındırır.
+
+---
+
+### `repositories/repo.py`
+Tüm SQL sorgularını servis katmanından soyutlayan 5 repository sınıfı:
+
+- **`UserRepository`** — Kullanıcı sorgulama, aktif kullanıcı listesi, engagement rate güncelleme.
+- **`PostRepository`** — Post sorgulama, viral sıralama, kullanıcının görmediği postlar.
+- **`InteractionRepository`** — Etkileşim oluşturma, user-item matrisi ham verisi.
+- **`FollowRepository`** — Takip CRUD, interaction weight güncelleme.
+- **`RecommendationRepository`** — Toplu kayıt (`bulk_save`), stale temizleme, model istatistikleri, `Precision@K`.
+
+---
+
+### `services/recommendation.py`
+Projenin kalbi. 5 öneri stratejisi + batch pipeline:
+
+#### `user_cf(user_id, limit)` — User-Based Collaborative Filtering
+Pearson korelasyonu ile kullanıcı benzerliği hesaplar. Hedef kullanıcının takip ettiği kişiler arasından en benzer K komşuyu bulur, onların beğendiği henüz görülmemiş postları ağırlıklı tahmin skoru ile sıralar.
+
+#### `content_based(user_id, limit)` — Content-Based Filtering
+Kullanıcının son 90 günlük hashtag kullanım frekansından affinity profili çıkarır. Görülmemiş adayları `hashtag_affinity × 0.40 + freshness × 0.30 + virality × 0.30` formülü ile skorlar. Tazelik, 24 saatlik yarı-ömürlü üstel decay ile hesaplanır.
+
+#### `hybrid(user_id, limit)` — Hybrid Öneri
+CF ve CBF skorlarını min-max normalize edip `CF×0.50 + CBF×0.35 + Popularity×0.15` ağırlıkları ile birleştirir. Cold start tespiti yapar; CF verisi yoksa ağırlık otomatik CBF'e kayar.
+
+#### `cold_start(limit)` — Soğuk Başlangıç
+Yeni kullanıcılar için her medya tipinden en viral 5 içeriği getirir (diversity zorlanmış). Son 72 saatin trending postları baz alınır.
+
+#### `run_batch_pipeline(model_version)` — Toplu Öneri Üretimi
+Tüm aktif kullanıcılar için günlük öneri batch'i çalıştırır. Stale önerileri temizler, kota kontrolü yapar, hataları loglayarak devam eder.
+
+---
+
+### `services/analytics.py`
+4 analitik modül:
+
+#### `daily_engagement(since_days, user_id)` — Günlük Engagement
+SQL window function ile 7 günlük rolling ortalama hesaplar. `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` penceresi kullanır. Sonuçlar ML time-series feature olarak kullanılabilir.
+
+#### `cohort_retention()` — Cohort Analizi
+Kullanıcıları kayıt ayına göre gruplar; ilerleyen aylarda kaç tanesi aktif kalmış hesaplar. Klasik SaaS retention tablosu üretir.
+
+#### `churn_risk_scores(label_filter)` — Churn Tespiti
+Aktivite düşüşü (`sessions_last_30d / sessions_prev_30d`) ve pasiflik süresi sinyallerini birleştiren risk skoru. `churn_label` kolonu supervised learning için hazır label olarak kullanılabilir: `churned | at_risk | declining | healthy`.
+
+#### `influence_scores(top_n)` — Network Etki Analizi
+2-hop PageRank benzeri etki skoru. Doğrudan takipçi ağırlığı × 0.7 + 2. derece bağlantı × 0.3. GNN edge feature'ı olarak kullanılabilir.
+
+#### `ml_feature_store(user_ids)` — ML Feature Store
+Model eğitimi için hazır feature vektörü. `log_followers`, `log_posts` gibi log-transform uygulanmış kolonlar dahil. Çıktı doğrudan `pandas.read_sql()` ile DataFrame'e alınabilir.
+
+---
+
+### `services/ab_test.py`
+Model performansı ve istatistiksel karşılaştırma:
+
+#### `model_performance(since_days)` — Model Metrik Tablosu
+Her model versiyonu için CTR, ortalama skor, tıklama sonrası virality ve dwell time metriklerini hesaplar.
+
+#### `ab_compare(version_a, version_b)` — İstatistiksel A/B Testi
+İki model arasında proporsiyon z-testi uygular. `p < 0.05` eşiğinde kazananı ilan eder. Z-skordan p-değeri için Abramowitz & Stegun yaklaşımı kullanır.
+
+#### `precision_at_k(k, since_days)` — Precision@K
+Son N günde verilen önerilerin ilk K sırasında kaçı tıklandı? Standart IR metriği.
+
+#### `monitoring_report(since_days)` — Monitoring Dashboard
+Tüm metrikleri birleştiren özet rapor. Celery/APScheduler ile günlük Slack bildirimi için kullanılabilir.
+
+---
+
+### `main.py`
+Gerçek PostgreSQL bağlantısı gerektirmeden tüm servislerin çalıştığını gösteren **demo runner**. Mock veri üretir, her servisi çalıştırır ve çıktıları terminale yazar. Hızlı inceleme için başlangıç noktası.
+
+---
+
+## 🗄️ Veritabanı Şeması
+
+```
+users ──────────────────────────────────────────────────────
+  id UUID PK | username | email | embedding VECTOR(384)
+  follower_count | following_count | avg_engagement_rate
+
+posts ──────────────────────────────────────────────────────
+  id UUID PK | user_id FK | content | media_type
+  virality_score | sentiment_score | content_embedding VECTOR(384)
+
+follows ────────────────────────────────────────────────────
+  (follower_id, following_id) PK | interaction_weight
+
+interactions ───────────────────────────────────────────────
+  id UUID PK | user_id FK | post_id FK | type
+  dwell_time_ms | scroll_depth
+
+hashtags + post_hashtags ───────────────────────────────────
+  tag | usage_count | trend_score
+
+user_sessions ──────────────────────────────────────────────
+  session_duration_s | posts_viewed | device_type
+
+recommendations ────────────────────────────────────────────
+  source_user_id FK | target_post_id FK
+  score | model_version | was_clicked
+```
+
+### Index Stratejisi
+
+| Index Türü | Kullanım Amacı |
+|------------|----------------|
+| B-Tree | Foreign key join, zaman serisi sıralama, virality/trend sıralama |
+| IVFFlat (pgvector) | Embedding ANN araması — kullanıcı ve içerik benzerliği |
+| GIN (tsvector) | Full-text search — içerik arama |
+| GIN (trigram) | Prefix/infix hashtag araması |
+| Partial | `dwell_time_ms > 5000` — sadece yüksek engagement etkileşimleri |
+
+---
+
+## ⚙️ Kurulum
+
+### Gereksinimler
+
+- Python 3.11+
+- PostgreSQL 14+ (`pgvector` ve `pg_trgm` extension'ları ile)
+- pip
+
+### 1. Repoyu Klonla
+
+```bash
+git clone https://github.com/kullanici-adin/social-media-analytics.git
+cd social-media-analytics
+```
+
+### 2. Sanal Ortam Oluştur
+
+```bash
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 3. PostgreSQL Extension'larını Kur
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+```
+
+### 4. Ortam Değişkenlerini Ayarla
+
+```bash
+cp .env.example .env
+```
+
+`.env` dosyasını düzenle:
+
+```env
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=social_media_db
+DB_USER=postgres
+DB_PASSWORD=your_password
+DB_ECHO=false
+```
+
+### 5. Tabloları Oluştur
+
+```python
+from social_media_analytics.core.database import database
+database.create_all_tables()
+```
+
+---
+
+## 🚀 Kullanım
+
+### Demo (Mock Veri)
+
+PostgreSQL bağlantısı olmadan tüm servisleri test et:
+
+```bash
+python -m social_media_analytics.main
+```
+
+Çıktıda şunları görürsün:
+- Cold start önerileri
+- User-based CF önerileri
+- Content-based öneriler
+- Hybrid öneri skorları
+- Engagement analizi
+- Churn risk sıralaması
+- Network etki skorları
+- A/B test sonuçları
+
+### Gerçek Veritabanı ile Kullanım
+
+```python
+from social_media_analytics.core.database import database
+from social_media_analytics.services.recommendation import RecommendationEngine
+from social_media_analytics.services.analytics import AnalyticsService
+from social_media_analytics.services.ab_test import ABTestService
+
+# Hybrid öneri üret
+with database.session() as session:
+    engine = RecommendationEngine(session)
+    recs = engine.hybrid(user_id="<uuid>", limit=20)
+    for rec in recs:
+        print(rec)
+
+# Churn analizi
+with database.session() as session:
+    analytics = AnalyticsService(session)
+    at_risk = analytics.churn_risk_scores(label_filter="at_risk")
+    for user in at_risk:
+        print(user)
+
+# A/B test karşılaştırması
+with database.session() as session:
+    ab = ABTestService(session)
+    result = ab.ab_compare("v1.0", "v2.0")
+    print(result)
+
+# Batch pipeline (Celery/cron ile tetiklenebilir)
+with database.session() as session:
+    engine = RecommendationEngine(session)
+    stats = engine.run_batch_pipeline(model_version="v2.0")
+    print(stats)  # {"processed": 1200, "total_recs": 60000, "errors": 3}
+```
+
+### ML Feature Store'dan Veri Çekme
+
+```python
+import pandas as pd
+from sqlalchemy import text
+from social_media_analytics.core.database import database
+from social_media_analytics.services.analytics import AnalyticsService
+
+with database.session() as session:
+    analytics = AnalyticsService(session)
+    features = analytics.ml_feature_store()
+
+df = pd.DataFrame(features)
+print(df[["username", "follower_count", "engagement_rate", "log_followers"]].head())
+```
+
+---
+
+## 🔧 Servisler
+
+### RecommendationEngine
+
+```python
+engine = RecommendationEngine(session)
+
+engine.cold_start(limit=20)              # Yeni kullanıcı
+engine.user_cf(user_id, limit=20)        # Pearson CF
+engine.content_based(user_id, limit=20) # Hashtag + tazelik + virality
+engine.hybrid(user_id, limit=20)        # CF + CBF + Popularity
+engine.persist_recommendations(user_id, recs, model_version="v2.0")
+engine.run_batch_pipeline(model_version="v2.0")
+```
+
+### AnalyticsService
+
+```python
+analytics = AnalyticsService(session)
+
+analytics.daily_engagement(since_days=30)          # Rolling 7d engagement
+analytics.hourly_heatmap(since_days=90)            # Gün × Saat heatmap
+analytics.cohort_retention()                        # Aylık retention tablosu
+analytics.churn_risk_scores(label_filter="at_risk") # Churn risk sıralaması
+analytics.influence_scores(top_n=100)              # Network etki skoru
+analytics.ml_feature_store(user_ids=[...])         # ML feature vektörü
+```
+
+### ABTestService
+
+```python
+ab = ABTestService(session)
+
+ab.model_performance(since_days=14)         # Tüm modeller CTR + dwell
+ab.ab_compare("v1.0", "v2.0")              # İstatistiksel z-testi
+ab.precision_at_k(k=10, since_days=7)      # Precision@10
+ab.monitoring_report(since_days=14)         # Özet dashboard dict
+```
+
+---
+
+## 🤖 ML Entegrasyonu
+
+### Embedding Kolonları
+
+`users.embedding` ve `posts.content_embedding` kolonları `VECTOR(384)` tipindedir. [sentence-transformers](https://www.sbert.net/) ile üretilen embeddingler doğrudan kaydedilebilir:
+
+```python
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("all-MiniLM-L6-v2")
+embedding = model.encode("Post içeriği burada").tolist()
+
+post.content_embedding = embedding
+session.commit()
+```
+
+### ANN Araması
+
+```python
+# pgvector ile en benzer 20 içerik
+result = session.execute(text("""
+    SELECT id, content,
+           1 - (content_embedding <=> :query_vec) AS similarity
+    FROM posts
+    ORDER BY content_embedding <=> :query_vec
+    LIMIT 20
+"""), {"query_vec": str(query_embedding)})
+```
+
+### DataFrame'e Aktarım
+
+```python
+import pandas as pd
+from sqlalchemy import text
+
+with database.engine.connect() as conn:
+    df = pd.read_sql(text("SELECT * FROM ..."), conn)
+```
+
+---
+
+## 🛠️ Teknolojiler
+
+| Teknoloji | Versiyon | Kullanım Amacı |
+|-----------|----------|----------------|
+| **PostgreSQL** | 14+ | Ana veritabanı |
+| **pgvector** | 0.5+ | Embedding vektör araması (IVFFlat ANN) |
+| **SQLAlchemy** | 2.0+ | ORM, session yönetimi, connection pooling |
+| **psycopg2** | 2.9+ | PostgreSQL Python sürücüsü |
+| **Python** | 3.11+ | Servis katmanı, analitik, recommendation engine |
+
+### Opsiyonel (Üretim Ortamı)
+
+| Teknoloji | Kullanım Amacı |
+|-----------|----------------|
+| **Celery + Redis** | Batch pipeline zamanlaması |
+| **sentence-transformers** | Embedding üretimi |
+| **pandas** | Feature store verisi DataFrame'e aktarım |
+| **scipy** | Gelişmiş istatistiksel testler |
+| **Alembic** | Veritabanı migration yönetimi |
+
+---
+
+## 📋 requirements.txt Açıklaması
+
+```
+sqlalchemy>=2.0.0    # ORM katmanı — mapped_column, DeclarativeBase (2.0 syntax)
+psycopg2-binary>=2.9.0  # PostgreSQL sürücüsü — binary paket, derleme gerektirmez
+pgvector>=0.2.0      # SQLAlchemy için Vector tip desteği — VECTOR(384) kolonları
+```
+
+---
+
+## 🗺️ Yol Haritası
+
+- [ ] FastAPI endpoint katmanı ekleme
+- [ ] Alembic ile migration sistemi
+- [ ] Celery batch pipeline entegrasyonu
+- [ ] sentence-transformers ile otomatik embedding üretimi
+- [ ] Grafana dashboard entegrasyonu (model monitoring için)
+- [ ] Docker Compose ile tek komutla ayağa kalkma
+
+---
+
+## 👤 Yazar
+
+Bu proje bir **AI Engineer** tarafından SQL + Python becerilerini gerçek dünya problemleri üzerinde derinleştirmek amacıyla geliştirilmiştir.
+
+---
+
+## 📝 Lisans
+
+MIT License — dilediğiniz gibi kullanabilirsiniz.
