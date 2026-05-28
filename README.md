@@ -1,582 +1,660 @@
+# 📊 Social Media Analytics Backend
 
-Social Media Analytics Backend — Demo Runner
-=============================================
-Tüm servisleri mock veriyle çalıştırır ve çıktıları gösterir.
-Gerçek PostgreSQL bağlantısı olmadan da mantığı inceleyebilirsiniz.
+> **AI Engineer odaklı**, üretim kalitesinde sosyal medya analitik + ML altyapısı.  
+> PostgreSQL + SQLAlchemy ORM + Gerçek ML Pipeline ile inşa edilmiştir.
 
+---
 
-import json
-import logging
-import math
-from datetime import datetime, timedelta
-from dataclasses import dataclass, field
-from typing import Optional
-import random
-import uuid
+## 🗂️ İçindekiler
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
-    datefmt="%H:%M:%S",
+- [Proje Hakkında](#-proje-hakkında)
+- [Proje Yapısı](#-proje-yapısı)
+- [Dosya Açıklamaları](#-dosya-açıklamaları)
+- [Veritabanı Şeması](#-veritabanı-şeması)
+- [Kurulum](#-kurulum)
+- [Kullanım](#-kullanım)
+- [ML Pipeline](#-ml-pipeline)
+- [Servisler](#-servisler)
+- [Teknolojiler](#-teknolojiler)
+- [Yol Haritası](#-yol-haritası)
+
+---
+
+## 🎯 Proje Hakkında
+
+Bu proje, sosyal medya platformlarının arka tarafında çalışan **analitik ve öneri sistemi altyapısını** sıfırdan tasarlamak amacıyla geliştirilmiştir. Standart bir CRUD backend'in ötesine geçerek şu alanlara odaklanır:
+
+- **Recommendation Engine** — User-based CF (Pearson), Item-based CF (Cosine), Content-based Filtering, Hybrid ve Cold Start stratejileri
+- **Analitik** — Günlük engagement analizi, rolling window, cohort retention, churn tespiti, network etki skoru
+- **ML Pipeline** — Feature engineering, sentence-transformers embedding, ALS / SVD / LightGBM eğitimi, NDCG & Precision@K karşılaştırması
+- **A/B Test & Model Monitoring** — CTR karşılaştırması, istatistiksel anlamlılık (z-testi), batch pipeline
+
+### Neden Bu Proje?
+
+Çoğu SQL/Python eğitimi temel CRUD örneklerinde kalır. Bu proje şunları bir arada gösterir:
+
+| Katman | Kapsam |
+|--------|--------|
+| SQL | Window functions, CTE, Pearson korelasyonu, cohort analizi, IVFFlat index, Partial index |
+| Python | SQLAlchemy 2.0 ORM, Repository pattern, Service layer, dataclass'lar |
+| ML | ALS, SVD, LightGBM, sentence-transformers embedding, NDCG / Precision@K / Coverage |
+| DevOps | Batch pipeline, model versiyonlama, A/B test istatistiği |
+
+---
+
+## 📁 Proje Yapısı
+
+```
+social_media_analytics/
+│
+├── core/
+│   ├── config.py                   # Yapılandırma dataclass'ları
+│   └── database.py                 # SQLAlchemy engine & session yönetimi
+│
+├── models/
+│   └── orm.py                      # 8 adet SQLAlchemy ORM modeli
+│
+├── repositories/
+│   └── repo.py                     # Veritabanı erişim katmanı (5 repository)
+│
+├── services/
+│   ├── recommendation.py           # Öneri motoru (CF + CBF + Hybrid + Cold Start)
+│   ├── analytics.py                # Engagement, cohort, churn, network analizi
+│   └── ab_test.py                  # A/B test & model monitoring
+│
+├── ml/
+│   ├── data/
+│   │   ├── feature_engineering.py  # Sparse matris, user/item feature vektörleri
+│   │   └── embeddings.py           # sentence-transformers embedding üretimi
+│   ├── models/
+│   │   ├── als_model.py            # ALS — implicit feedback CF
+│   │   ├── svd_model.py            # SVD — matris faktörizasyonu
+│   │   └── lgbm_model.py           # LightGBM — feature-based ranking
+│   ├── evaluation/
+│   │   └── metrics.py              # NDCG, Precision@K, Recall@K, Coverage, Novelty
+│   └── pipeline/
+│       └── run_pipeline.py         # Uçtan uca pipeline orkestrasyonu
+│
+├── main.py                         # Mock veriyle çalışan demo runner
+└── requirements.txt                # Python bağımlılıkları
+```
+
+---
+
+## 📄 Dosya Açıklamaları
+
+### `core/config.py`
+Tüm yapılandırmaları `dataclass` olarak tutar. Üç ana config sınıfı içerir:
+
+- **`DatabaseConfig`** — PostgreSQL bağlantı bilgileri, pool ayarları. `from_env()` metodu ile `.env` dosyasından otomatik okur.
+- **`RecommendationConfig`** — CF parametreleri (komşu sayısı, minimum ortak etkileşim), hybrid ağırlıklar, sinyal ağırlıkları, cold start ayarları.
+- **`AnalyticsConfig`** — Rolling window, cohort eşikleri, network analizi ağırlıkları.
+
+---
+
+### `core/database.py`
+SQLAlchemy engine ve session yönetimini kapsüller.
+
+- **`Database` sınıfı** — `QueuePool` ile connection pooling, `pool_pre_ping=True` ile kopuk bağlantı tespiti.
+- **`session()` context manager** — `with db.session() as s:` kullanımı; hata durumunda otomatik rollback.
+- **`health_check()`** — Bağlantı canlılık testi.
+
+---
+
+### `models/orm.py`
+SQLAlchemy 2.0 `mapped_column` syntax ile yazılmış 8 ORM modeli:
+
+| Model | Tablo | Açıklama |
+|-------|-------|----------|
+| `User` | `users` | Kullanıcı profili + `VECTOR(384)` embedding |
+| `Post` | `posts` | İçerik + virality/sentiment skoru + içerik embedding |
+| `Follow` | `follows` | Takip ilişkisi + `interaction_weight` (GNN edge feature) |
+| `Interaction` | `interactions` | Etkileşimler + `dwell_time_ms` + `scroll_depth` |
+| `Hashtag` | `hashtags` | Hashtag + `trend_score` |
+| `PostHashtag` | `post_hashtags` | M:N köprü tablo |
+| `UserSession` | `user_sessions` | Oturum verisi (churn modeli için) |
+| `Recommendation` | `recommendations` | Model çıktıları + `was_clicked` feedback |
+
+Her model ilgili index tanımlarını `__table_args__` içinde barındırır.
+
+---
+
+### `repositories/repo.py`
+Tüm SQL sorgularını servis katmanından soyutlayan 5 repository sınıfı:
+
+- **`UserRepository`** — Kullanıcı sorgulama, aktif kullanıcı listesi, engagement rate güncelleme.
+- **`PostRepository`** — Post sorgulama, viral sıralama, kullanıcının görmediği postlar.
+- **`InteractionRepository`** — Etkileşim oluşturma, user-item matrisi ham verisi.
+- **`FollowRepository`** — Takip CRUD, interaction weight güncelleme.
+- **`RecommendationRepository`** — Toplu kayıt (`bulk_save`), stale temizleme, model istatistikleri, `Precision@K`.
+
+---
+
+### `services/recommendation.py`
+Projenin SQL katmanındaki kalbi. 5 öneri stratejisi + batch pipeline:
+
+#### `user_cf(user_id, limit)` — User-Based Collaborative Filtering
+Pearson korelasyonu ile kullanıcı benzerliği hesaplar. Hedef kullanıcının takip ettiği kişiler arasından en benzer K komşuyu bulur, onların beğendiği henüz görülmemiş postları ağırlıklı tahmin skoru ile sıralar.
+
+#### `content_based(user_id, limit)` — Content-Based Filtering
+Kullanıcının son 90 günlük hashtag kullanım frekansından affinity profili çıkarır. Görülmemiş adayları `hashtag_affinity × 0.40 + freshness × 0.30 + virality × 0.30` formülü ile skorlar. Tazelik, 24 saatlik yarı-ömürlü üstel decay ile hesaplanır.
+
+#### `hybrid(user_id, limit)` — Hybrid Öneri
+CF ve CBF skorlarını min-max normalize edip `CF×0.50 + CBF×0.35 + Popularity×0.15` ağırlıkları ile birleştirir. Cold start tespiti yapar; CF verisi yoksa ağırlık otomatik CBF'e kayar.
+
+#### `cold_start(limit)` — Soğuk Başlangıç
+Yeni kullanıcılar için her medya tipinden en viral 5 içeriği getirir (diversity zorlanmış). Son 72 saatin trending postları baz alınır.
+
+#### `run_batch_pipeline(model_version)` — Toplu Öneri Üretimi
+Tüm aktif kullanıcılar için günlük öneri batch'i çalıştırır. Stale önerileri temizler, kota kontrolü yapar, hataları loglayarak devam eder.
+
+---
+
+### `services/analytics.py`
+4 analitik modül:
+
+#### `daily_engagement(since_days, user_id)` — Günlük Engagement
+SQL window function ile 7 günlük rolling ortalama hesaplar. `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` penceresi kullanır. Sonuçlar ML time-series feature olarak kullanılabilir.
+
+#### `cohort_retention()` — Cohort Analizi
+Kullanıcıları kayıt ayına göre gruplar; ilerleyen aylarda kaç tanesi aktif kalmış hesaplar. Klasik SaaS retention tablosu üretir.
+
+#### `churn_risk_scores(label_filter)` — Churn Tespiti
+Aktivite düşüşü (`sessions_last_30d / sessions_prev_30d`) ve pasiflik süresi sinyallerini birleştiren risk skoru. `churn_label` kolonu supervised learning için hazır label: `churned | at_risk | declining | healthy`.
+
+#### `influence_scores(top_n)` — Network Etki Analizi
+2-hop PageRank benzeri etki skoru. Doğrudan takipçi ağırlığı × 0.7 + 2. derece bağlantı × 0.3. GNN edge feature'ı olarak kullanılabilir.
+
+#### `ml_feature_store(user_ids)` — ML Feature Store
+Model eğitimi için hazır feature vektörü. `log_followers`, `log_posts` gibi log-transform uygulanmış kolonlar dahil. Çıktı doğrudan `pandas.read_sql()` ile DataFrame'e alınabilir.
+
+---
+
+### `services/ab_test.py`
+Model performansı ve istatistiksel karşılaştırma:
+
+#### `model_performance(since_days)` — Model Metrik Tablosu
+Her model versiyonu için CTR, ortalama skor, tıklama sonrası virality ve dwell time metriklerini hesaplar.
+
+#### `ab_compare(version_a, version_b)` — İstatistiksel A/B Testi
+İki model arasında proporsiyon z-testi uygular. `p < 0.05` eşiğinde kazananı ilan eder. Z-skordan p-değeri için Abramowitz & Stegun yaklaşımı kullanır.
+
+#### `precision_at_k(k, since_days)` — Precision@K
+Son N günde verilen önerilerin ilk K sırasında kaçı tıklandı? Standart IR metriği.
+
+#### `monitoring_report(since_days)` — Monitoring Dashboard
+Tüm metrikleri birleştiren özet rapor. Celery/APScheduler ile günlük Slack bildirimi için kullanılabilir.
+
+---
+
+### `ml/data/feature_engineering.py`
+Ham etkileşim verisini ML'e hazır yapılara dönüştürür.
+
+- **`prepare_features(interaction_records)`** — Ana giriş noktası. Etkileşim listesini alır; sparse matris, user feature DataFrame ve post feature DataFrame üretir.
+- **`build_user_item_matrix()`** — `(n_users × n_items)` scipy sparse matris. ALS ve SVD'ye doğrudan girdi.
+- **`build_user_features()`** — 18 kolonlu kullanıcı feature vektörü: `like_rate`, `share_rate`, `avg_dwell_ms`, `recency_days`, `log_interactions` vb.
+- **`build_post_features()`** — 18 kolonlu içerik feature vektörü: `popularity_score`, `freshness`, `post_age_days`, `log_unique_users` vb.
+- **`compute_interaction_score()`** — Explicit + implicit sinyalleri `share×5 + save×4 + like×3 + dwell_bonus` formülüyle tek skora indirger.
+
+---
+
+### `ml/data/embeddings.py`
+sentence-transformers ile içerik ve kullanıcı embedding'leri üretir.
+
+- **`EmbeddingProducer`** — `all-MiniLM-L6-v2` modeli ile 384 boyutlu vektör üretir. Kütüphane yüklü değilse hash tabanlı deterministik mock embedding kullanır (test ortamı için).
+- **`EmbeddingRecommender`** — Post embedding'lerini in-memory index'e alır, kullanıcının beğendiği postların ağırlıklı ortalamasından ilgi vektörü (centroid) üretir, cosine similarity ile öneri sıralar.
+- **`compute_user_embedding()`** — Beğenilen post vektörlerinin sinyal ağırlıklı ortalaması. L2 normalize edilmiş.
+- **`find_similar()`** — Query embedding'e ANN araması yapar. Görülmüş içerikler otomatik hariç tutulur.
+
+---
+
+### `ml/models/als_model.py`
+ALS (Alternating Least Squares) — implicit feedback matris faktörizasyonu.
+
+- `implicit` kütüphanesi varsa BM25 ağırlıklandırmalı production ALS çalışır; yoksa saf NumPy fallback devreye girer.
+- **`ALSConfig`** — `factors=64`, `iterations=20`, `regularization=0.01`, `use_bm25=True` varsayılan değerleri.
+- **`ALSResult.recommend_for_user()`** — Kullanıcı faktör vektörü ile item faktör matrisinin dot product'ı; görülmüş itemler `-inf` ile maskelenir.
+
+---
+
+### `ml/models/svd_model.py`
+SVD (Truncated Singular Value Decomposition) — sklearn tabanlı matris faktörizasyonu.
+
+- **`SVDTrainer.train()`** — `TruncatedSVD` ile `U × Σ` (kullanıcı) ve `V × Σ` (item) embedding matrisleri üretir. L2 normalize seçeneği var.
+- **`SVDResult.get_similar_items()`** — Item-item cosine similarity. "Bunu beğenenler bunları da beğendi" senaryosu için kullanılır.
+- Açıklanan varyans oranı loglanır; kaç faktörün yeterli olduğu izlenebilir.
+
+---
+
+### `ml/models/lgbm_model.py`
+LightGBM — feature tabanlı learning-to-rank modeli.
+
+- **`build_training_dataframe()`** — Her `(user, item)` çifti için kullanıcı + post feature'larını + ALS/SVD stacking skorlarını birleştirir. Label: `interaction_score >= 3.0` (like veya üzeri).
+- **`LGBMTrainer.train()`** — Binary classification (`objective=binary`, `metric=auc`). `lightgbm` yoksa `LogisticRegression` fallback.
+- **`LGBMTrainer.recommend()`** — Görülmemiş tüm postlar için feature vektörü oluşturur, tıklama olasılığını tahmin eder.
+- Feature importance çıktısı hangi sinyalin model kararında ne kadar belirleyici olduğunu gösterir.
+
+---
+
+### `ml/evaluation/metrics.py`
+Öneri modellerini karşılaştıran standart IR metrikleri.
+
+- **`precision_at_k()`** — İlk K önerideki ilgili içerik oranı.
+- **`recall_at_k()`** — İlgili içeriklerin kaçı ilk K içinde yakalandı.
+- **`ndcg_at_k()`** — Normalized Discounted Cumulative Gain. Sıralama kalitesini ölçer; mükemmel sıralama = 1.0.
+- **`ModelEvaluator.evaluate()`** — Tüm metrikleri hesaplar, coverage (katalog kapsama oranı) ve novelty (popüler olmayan item önerme oranı) ekler.
+- **`ModelEvaluator.train_test_split()`** — Zaman tabanlı split: her kullanıcının son %20 etkileşimi test seti. Gelecekteki davranışı simüle eder.
+- **`ModelEvaluator.compare_models()`** — Birden fazla modeli DataFrame olarak yan yana karşılaştırır.
+
+---
+
+### `ml/pipeline/run_pipeline.py`
+Tüm ML adımlarını sırayla çalıştıran orkestratör.
+
+Pipeline adımları:
+1. Mock veri veya DB verisi ile başlatma
+2. Feature engineering (sparse matris + DataFrame'ler)
+3. sentence-transformers ile post indexleme + kullanıcı profil üretimi
+4. Zaman tabanlı train/test split
+5. ALS, SVD, LightGBM ve Embedding-CBF modellerini eğitme
+6. Her model için NDCG@5, NDCG@10, P@10, Coverage, Novelty hesaplama
+7. Karşılaştırma tablosu + kazanan model ilanı
+8. LightGBM feature importance çıktısı
+
+```
+python -m social_media_analytics.ml.pipeline.run_pipeline
+```
+
+---
+
+### `main.py`
+Gerçek PostgreSQL bağlantısı gerektirmeden tüm servislerin çalıştığını gösteren **demo runner**. Mock veri üretir, her servisi çalıştırır ve çıktıları terminale yazar.
+
+---
+
+## 🗄️ Veritabanı Şeması
+
+```
+users ──────────────────────────────────────────────────────
+  id UUID PK | username | email | embedding VECTOR(384)
+  follower_count | following_count | avg_engagement_rate
+
+posts ──────────────────────────────────────────────────────
+  id UUID PK | user_id FK | content | media_type
+  virality_score | sentiment_score | content_embedding VECTOR(384)
+
+follows ────────────────────────────────────────────────────
+  (follower_id, following_id) PK | interaction_weight
+
+interactions ───────────────────────────────────────────────
+  id UUID PK | user_id FK | post_id FK | type
+  dwell_time_ms | scroll_depth
+
+hashtags + post_hashtags ───────────────────────────────────
+  tag | usage_count | trend_score
+
+user_sessions ──────────────────────────────────────────────
+  session_duration_s | posts_viewed | device_type
+
+recommendations ────────────────────────────────────────────
+  source_user_id FK | target_post_id FK
+  score | model_version | was_clicked
+```
+
+### Index Stratejisi
+
+| Index Türü | Kullanım Amacı |
+|------------|----------------|
+| B-Tree | Foreign key join, zaman serisi sıralama, virality/trend sıralama |
+| IVFFlat (pgvector) | Embedding ANN araması — kullanıcı ve içerik benzerliği |
+| GIN (tsvector) | Full-text search — içerik arama |
+| GIN (trigram) | Prefix/infix hashtag araması |
+| Partial | `dwell_time_ms > 5000` — sadece yüksek engagement etkileşimleri |
+
+---
+
+## ⚙️ Kurulum
+
+### Gereksinimler
+
+- Python 3.11+
+- PostgreSQL 14+ (`pgvector` ve `pg_trgm` extension'ları ile)
+- pip
+
+### 1. Repoyu Klonla
+
+```bash
+git clone https://github.com/kullanici-adin/social-media-analytics.git
+cd social-media-analytics
+```
+
+### 2. Sanal Ortam Oluştur
+
+```bash
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 3. PostgreSQL Extension'larını Kur
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+```
+
+### 4. Ortam Değişkenlerini Ayarla
+
+```bash
+cp .env.example .env
+```
+
+`.env` dosyasını düzenle:
+
+```env
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=social_media_db
+DB_USER=postgres
+DB_PASSWORD=your_password
+DB_ECHO=false
+```
+
+### 5. Tabloları Oluştur
+
+```python
+from social_media_analytics.core.database import database
+database.create_all_tables()
+```
+
+---
+
+## 🚀 Kullanım
+
+### Demo — Servis Katmanı (Mock Veri)
+
+PostgreSQL bağlantısı olmadan tüm servisleri test et:
+
+```bash
+python -m social_media_analytics.main
+```
+
+Çıktıda şunları görürsün:
+- Cold start, CF, CBF ve Hybrid önerileri
+- Engagement analizi ve churn sıralaması
+- Network etki skorları
+- A/B test sonuçları
+
+### Demo — ML Pipeline (Mock Veri)
+
+4 modeli eğitip NDCG / Precision@K karşılaştırması yap:
+
+```bash
+python -m social_media_analytics.ml.pipeline.run_pipeline
+```
+
+Örnek çıktı:
+```
+               NDCG@5  NDCG@10   P@10  coverage  novelty
+ALS            0.0272   0.0422  0.018     0.980   0.378
+SVD            0.0163   0.0206  0.012     0.970   0.460
+LightGBM       0.0104   0.0238  0.016     0.135   0.464
+Embedding-CBF  0.0000   0.0000  0.000     0.000   1.000
+
+🏆 KAZANAN: ALS (NDCG@10=0.0422)
+```
+
+### Gerçek Veritabanı ile Kullanım
+
+```python
+from social_media_analytics.core.database import database
+from social_media_analytics.services.recommendation import RecommendationEngine
+from social_media_analytics.services.analytics import AnalyticsService
+from social_media_analytics.services.ab_test import ABTestService
+
+# Hybrid öneri üret
+with database.session() as session:
+    engine = RecommendationEngine(session)
+    recs = engine.hybrid(user_id="<uuid>", limit=20)
+    for rec in recs:
+        print(rec)
+
+# Churn analizi
+with database.session() as session:
+    analytics = AnalyticsService(session)
+    at_risk = analytics.churn_risk_scores(label_filter="at_risk")
+    for user in at_risk:
+        print(user)
+
+# Batch pipeline (Celery/cron ile tetiklenebilir)
+with database.session() as session:
+    engine = RecommendationEngine(session)
+    stats = engine.run_batch_pipeline(model_version="v2.0")
+    print(stats)  # {"processed": 1200, "total_recs": 60000, "errors": 3}
+```
+
+---
+
+## 🤖 ML Pipeline
+
+### Mimari
+
+```
+Ham Veri (PostgreSQL / mock)
+         ↓
+Feature Engineering
+  ├── scipy sparse matrix  (n_users × n_items)
+  ├── user_features_df     (18 kolon)
+  └── post_features_df     (18 kolon)
+         ↓
+Embedding Üretimi
+  └── sentence-transformers → 384-dim post vektörleri
+      → kullanıcı ilgi profili (ağırlıklı centroid)
+         ↓
+Train / Test Split  (zaman tabanlı %80/%20)
+         ↓
+Model Eğitimi
+  ├── ALS        (implicit feedback, BM25 ağırlıklı)
+  ├── SVD        (TruncatedSVD, L2 normalize)
+  ├── LightGBM   (binary CTR tahmini, AUC metriği)
+  └── Embedding-CBF (cosine similarity + virality)
+         ↓
+Değerlendirme
+  ├── NDCG@5, NDCG@10
+  ├── Precision@K, Recall@K
+  ├── Coverage   (katalog kapsama oranı)
+  └── Novelty    (popüler olmayan item oranı)
+         ↓
+Karşılaştırma Tablosu + Kazanan Model
+```
+
+### Sinyal Ağırlıkları
+
+| Etkileşim | Ağırlık | Açıklama |
+|-----------|---------|----------|
+| share | 5.0 | En güçlü pozitif sinyal |
+| save | 4.0 | Yüksek ilgi göstergesi |
+| like | 3.0 | Standart pozitif sinyal |
+| comment | 2.5 | Aktif katılım |
+| view | 1.0 + dwell_bonus | Pasif sinyal; dwell time ile güçlenir |
+| report | -5.0 | Negatif sinyal |
+
+### sentence-transformers Entegrasyonu
+
+```bash
+pip install sentence-transformers
+```
+
+```python
+from social_media_analytics.ml.data.embeddings import EmbeddingProducer, EmbeddingConfig
+
+producer = EmbeddingProducer(EmbeddingConfig(model_name="all-MiniLM-L6-v2"))
+
+# Tek metin encode
+embedding = producer.encode_single("Python ile transformer modeli nasıl fine-tune edilir?")
+# → shape: (384,)
+
+# Toplu encode
+embeddings = producer.encode(["metin 1", "metin 2", "metin 3"])
+# → shape: (3, 384)
+```
+
+> `sentence-transformers` yüklü değilse otomatik olarak deterministik mock embedding kullanılır — test ve CI ortamları için uygundur.
+
+### Model Eğitimi
+
+```python
+from social_media_analytics.ml.data.feature_engineering import prepare_features
+from social_media_analytics.ml.models.als_model import ALSTrainer, ALSConfig
+from social_media_analytics.ml.models.svd_model import SVDTrainer, SVDConfig
+from social_media_analytics.ml.models.lgbm_model import LGBMTrainer, LGBMConfig, build_training_dataframe
+
+# Feature engineering
+feature_set = prepare_features(interaction_records)
+
+# ALS
+als_trainer = ALSTrainer(ALSConfig(factors=64, iterations=20))
+als_result  = als_trainer.train(feature_set)
+recs = als_trainer.recommend(als_result, feature_set, user_id="<uuid>", top_k=20)
+
+# SVD
+svd_trainer = SVDTrainer(SVDConfig(n_components=64))
+svd_result  = svd_trainer.train(feature_set)
+similar = svd_trainer.get_similar_posts(svd_result, feature_set, post_id="<uuid>")
+
+# LightGBM
+train_df    = build_training_dataframe(feature_set)
+lgbm_trainer = LGBMTrainer(LGBMConfig(n_estimators=200))
+lgbm_result  = lgbm_trainer.train(train_df)
+recs = lgbm_trainer.recommend(lgbm_result, feature_set, user_id="<uuid>")
+```
+
+### Değerlendirme
+
+```python
+from social_media_analytics.ml.evaluation.metrics import ModelEvaluator
+
+evaluator = ModelEvaluator(k_values=[5, 10, 20])
+
+# Train/test split
+train_df, ground_truth = evaluator.train_test_split(interaction_df, test_ratio=0.2)
+
+# Tek model değerlendir
+result = evaluator.evaluate(
+    model_name="ALS",
+    recommendations={"user_id": ["post_1", "post_2", ...]},
+    ground_truth={"user_id": {"post_1", "post_3"}},
+    all_item_ids=all_post_ids,
 )
-logger = logging.getLogger("main")
+print(result)  # NDCG@10=0.0422 | P@10=0.018 | Coverage=0.980
+
+# Birden fazla modeli karşılaştır
+df = evaluator.compare_models([als_result, svd_result, lgbm_result])
+print(df)
+```
+
+---
+
+## 🔧 Servisler
+
+### RecommendationEngine
 
+```python
+engine = RecommendationEngine(session)
 
-# ════════════════════════════════════════════════════════════
-# MOCK VERİ KATMANI
-# Gerçek DB olmadan servislerin mantığını göstermek için
-# ════════════════════════════════════════════════════════════
+engine.cold_start(limit=20)
+engine.user_cf(user_id, limit=20)
+engine.content_based(user_id, limit=20)
+engine.hybrid(user_id, limit=20)
+engine.persist_recommendations(user_id, recs, model_version="v2.0")
+engine.run_batch_pipeline(model_version="v2.0")
+```
 
-@dataclass
-class MockUser:
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    username: str = ""
-    follower_count: int = 0
-    following_count: int = 0
-    avg_engagement_rate: float = 0.0
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    last_active_at: datetime = field(default_factory=datetime.utcnow)
+### AnalyticsService
 
-@dataclass
-class MockPost:
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    user_id: str = ""
-    content: str = ""
-    media_type: str = "text"
-    like_count: int = 0
-    view_count: int = 0
-    comment_count: int = 0
-    share_count: int = 0
-    virality_score: float = 0.0
-    created_at: datetime = field(default_factory=datetime.utcnow)
+```python
+analytics = AnalyticsService(session)
 
-@dataclass
-class MockInteraction:
-    user_id: str
-    post_id: str
-    type: str
-    dwell_time_ms: int = 0
-    scroll_depth: float = 0.0
-    created_at: datetime = field(default_factory=datetime.utcnow)
+analytics.daily_engagement(since_days=30)
+analytics.hourly_heatmap(since_days=90)
+analytics.cohort_retention()
+analytics.churn_risk_scores(label_filter="at_risk")
+analytics.influence_scores(top_n=100)
+analytics.ml_feature_store(user_ids=[...])
+```
 
+### ABTestService
 
-def generate_mock_data():
-    """Gerçekçi mock veri seti oluştur."""
-    random.seed(42)
-    users, posts, interactions, follows = [], [], [], []
+```python
+ab = ABTestService(session)
 
-    usernames = [
-        "ali_ml", "zeynep_data", "can_engineer", "selin_ai",
-        "mert_dev", "ayse_nlp", "burak_cv", "elif_rec"
-    ]
+ab.model_performance(since_days=14)
+ab.ab_compare("v1.0", "v2.0")
+ab.precision_at_k(k=10, since_days=7)
+ab.monitoring_report(since_days=14)
+```
 
-    for uname in usernames:
-        user = MockUser(
-            username=uname,
-            follower_count=random.randint(100, 10_000),
-            following_count=random.randint(50, 500),
-            avg_engagement_rate=random.uniform(1.0, 8.0),
-            created_at=datetime.utcnow() - timedelta(days=random.randint(10, 365)),
-            last_active_at=datetime.utcnow() - timedelta(hours=random.randint(0, 120)),
-        )
-        users.append(user)
+---
 
-    topics = [
-        ("Python ile veri analizi nasıl yapılır?", "text"),
-        ("Transformer mimarisi görselleştirmesi", "image"),
-        ("SQL window functions detaylı anlatım", "text"),
-        ("PyTorch ile özel loss fonksiyonu", "text"),
-        ("Vector database karşılaştırması: Pinecone vs Weaviate", "text"),
-        ("RAG pipeline kurulumu — adım adım", "video"),
-        ("LLM fine-tuning best practices", "text"),
-        ("FastAPI + SQLAlchemy production setup", "text"),
-        ("A/B testing istatistiksel anlamlılık hesabı", "text"),
-        ("Recommendation system mimari tasarımı", "image"),
-        ("Embedding modelleri benchmark sonuçları", "text"),
-        ("Kafka ile real-time ML pipeline", "video"),
-    ]
+## 🛠️ Teknolojiler
 
-    for user in users:
-        for content, media_type in random.sample(topics, k=random.randint(2, 5)):
-            view_count = random.randint(200, 15_000)
-            like_count = int(view_count * random.uniform(0.02, 0.12))
-            comment_count = int(like_count * random.uniform(0.1, 0.4))
-            share_count = int(like_count * random.uniform(0.05, 0.2))
-            virality = (like_count + comment_count * 2 + share_count * 3) / view_count * 100
+| Teknoloji | Versiyon | Kullanım Amacı |
+|-----------|----------|----------------|
+| **PostgreSQL** | 14+ | Ana veritabanı |
+| **pgvector** | 0.5+ | Embedding vektör araması (IVFFlat ANN) |
+| **SQLAlchemy** | 2.0+ | ORM, session yönetimi, connection pooling |
+| **psycopg2** | 2.9+ | PostgreSQL Python sürücüsü |
+| **numpy** | 1.24+ | Matris işlemleri, embedding hesapları |
+| **scipy** | 1.11+ | Sparse matris (CSR format), ALS için |
+| **pandas** | 2.0+ | Feature DataFrame'leri, train/test split |
+| **scikit-learn** | 1.3+ | TruncatedSVD, normalizasyon, LR fallback |
+| **lightgbm** | 4.0+ | Feature-based ranking modeli |
+| **sentence-transformers** | 2.2+ | 384-dim içerik ve kullanıcı embedding'leri |
+| **implicit** | 0.7+ | Üretim kalitesi ALS (opsiyonel) |
+| **Python** | 3.11+ | Tüm servis ve ML katmanı |
 
-            post = MockPost(
-                user_id=user.id,
-                content=content,
-                media_type=media_type,
-                like_count=like_count,
-                view_count=view_count,
-                comment_count=comment_count,
-                share_count=share_count,
-                virality_score=round(virality, 3),
-                created_at=datetime.utcnow() - timedelta(hours=random.randint(0, 168)),
-            )
-            posts.append(post)
+### requirements.txt Açıklaması
 
-    # Etkileşimler
-    interaction_types = ["like", "view", "save", "share", "comment"]
-    for user in users:
-        sample_posts = random.sample(posts, k=min(15, len(posts)))
-        for post in sample_posts:
-            if post.user_id == user.id:
-                continue
-            itype = random.choices(
-                interaction_types, weights=[25, 50, 10, 8, 7], k=1
-            )[0]
-            interactions.append(MockInteraction(
-                user_id=user.id,
-                post_id=post.id,
-                type=itype,
-                dwell_time_ms=random.randint(1_000, 120_000) if itype == "view" else 0,
-                scroll_depth=random.uniform(0.1, 1.0),
-                created_at=datetime.utcnow() - timedelta(hours=random.randint(0, 720)),
-            ))
+```
+sqlalchemy>=2.0.0       # ORM — mapped_column, DeclarativeBase (2.0 syntax)
+psycopg2-binary>=2.9.0  # PostgreSQL sürücüsü — binary paket, derleme gerektirmez
+pgvector>=0.2.0         # SQLAlchemy için Vector tip desteği
 
-    # Takip ilişkileri
-    for i, user in enumerate(users):
-        targets = random.sample([u for u in users if u.id != user.id], k=random.randint(2, 5))
-        for target in targets:
-            follows.append((user.id, target.id, random.uniform(0.1, 1.0)))
+numpy>=1.24.0           # Matris işlemleri, embedding hesapları
+scipy>=1.11.0           # Sparse matris (CSR), ALS için
+pandas>=2.0.0           # Feature DataFrame'leri
+scikit-learn>=1.3.0     # TruncatedSVD, normalizasyon
+lightgbm>=4.0.0         # LightGBM ranking modeli
 
-    return users, posts, interactions, follows
+# Opsiyonel — gerçek embedding için
+sentence-transformers>=2.2.0
+implicit>=0.7.0         # Üretim kalitesi ALS + BM25
+```
 
+---
 
-# ════════════════════════════════════════════════════════════
-# RECOMMENDATION ENGINE (mock bağımsız)
-# ════════════════════════════════════════════════════════════
+## 🗺️ Yol Haritası
 
-class MockRecommendationEngine:
-    """
-    Gerçek DB olmadan çalışan recommendation engine demo.
-    Aynı algoritmaları kullanır, veri mock'tan gelir.
-    """
+- [x] PostgreSQL şema + index stratejisi
+- [x] SQLAlchemy ORM + Repository + Service katmanları
+- [x] Recommendation Engine (CF, CBF, Hybrid, Cold Start)
+- [x] Analytics (engagement, cohort, churn, network)
+- [x] A/B Test & Model Monitoring
+- [x] ML Pipeline (Feature Engineering + Embedding + ALS + SVD + LightGBM + NDCG)
+- [ ] FastAPI endpoint katmanı
+- [ ] Alembic ile migration sistemi
+- [ ] Celery batch pipeline entegrasyonu
+- [ ] Grafana dashboard (model monitoring)
+- [ ] Docker Compose ile tek komutla ayağa kalkma
 
-    def __init__(self, users, posts, interactions, follows):
-        self.users = {u.id: u for u in users}
-        self.posts = {p.id: p for p in posts}
-        self.interactions = interactions
-        self.follows = follows  # [(follower_id, following_id, weight)]
+---
 
-        # {user_id: {post_id: score}}
-        self.user_vectors = self._build_user_vectors()
+## 👤 Yazar
 
-    def _signal_weight(self, itype: str, dwell_ms: int = 0) -> float:
-        weights = {"share": 5.0, "save": 4.0, "like": 3.0,
-                   "comment": 2.5, "view": 1.0, "report": -5.0}
-        base = weights.get(itype, 0.0)
-        if itype == "view":
-            base += min(dwell_ms / 30_000, 1.0)
-        return base
+Bu proje bir **AI Engineer** tarafından SQL + Python + ML becerilerini gerçek dünya problemleri üzerinde derinleştirmek amacıyla geliştirilmiştir.
 
-    def _build_user_vectors(self) -> dict:
-        vectors = {}
-        for inter in self.interactions:
-            uid, pid = inter.user_id, inter.post_id
-            score = self._signal_weight(inter.type, inter.dwell_time_ms)
-            vectors.setdefault(uid, {})[pid] = vectors.get(uid, {}).get(pid, 0) + score
-        return vectors
+---
 
-    def _minmax(self, scores: dict) -> dict:
-        if not scores:
-            return {}
-        lo, hi = min(scores.values()), max(scores.values())
-        return {k: (v - lo) / (hi - lo) if hi != lo else 1.0 for k, v in scores.items()}
+## 📝 Lisans
 
-    def _freshness(self, created_at: datetime, half_life_hours: float = 24.0) -> float:
-        hours_old = (datetime.utcnow() - created_at).total_seconds() / 3600
-        return math.exp(-0.693 * hours_old / half_life_hours)
-
-    def user_cf(self, user_id: str, limit: int = 5) -> list[dict]:
-        """Pearson korelasyonu ile CF önerileri."""
-        target_vec = self.user_vectors.get(user_id, {})
-        if not target_vec:
-            return self.cold_start(limit=limit)
-
-        target_mean = sum(target_vec.values()) / len(target_vec)
-        following_ids = {fid for (fol, fid, _) in self.follows if fol == user_id}
-
-        similarities = []
-        for uid, n_vec in self.user_vectors.items():
-            if uid == user_id or uid not in following_ids:
-                continue
-            common = set(target_vec) & set(n_vec)
-            if len(common) < 3:
-                continue
-            n_mean = sum(n_vec.values()) / len(n_vec)
-            num = sum((target_vec[p] - target_mean) * (n_vec[p] - n_mean) for p in common)
-            den_t = math.sqrt(sum((target_vec[p] - target_mean) ** 2 for p in common))
-            den_n = math.sqrt(sum((n_vec[p] - n_mean) ** 2 for p in common))
-            if den_t * den_n == 0:
-                continue
-            pearson = num / (den_t * den_n)
-            if pearson > 0:
-                similarities.append((uid, pearson, n_vec))
-
-        top_k = sorted(similarities, key=lambda x: x[1], reverse=True)[:10]
-        if not top_k:
-            return self.cold_start(limit=limit)
-
-        seen = set(target_vec.keys())
-        predicted = {}
-        for uid, sim, n_vec in top_k:
-            for pid, score in n_vec.items():
-                if pid in seen:
-                    continue
-                ws, vc = predicted.get(pid, (0.0, 0))
-                predicted[pid] = (ws + sim * score, vc + 1)
-
-        filtered = {
-            pid: ws / sum(abs(s) for _, s, _ in top_k)
-            for pid, (ws, vc) in predicted.items()
-            if vc >= 2
-        }
-        normalized = self._minmax(filtered)
-        top = sorted(normalized.items(), key=lambda x: x[1], reverse=True)[:limit]
-
-        results = []
-        for pid, score in top:
-            post = self.posts.get(pid)
-            author = self.users.get(post.user_id) if post else None
-            if post:
-                results.append({
-                    "post_id": pid[:8],
-                    "author": author.username if author else "?",
-                    "content": post.content[:60],
-                    "score": round(score, 4),
-                    "source": "user_cf",
-                    "reason": "Takip ettiğin kişiler beğendi",
-                })
-        return results
-
-    def content_based(self, user_id: str, limit: int = 5) -> list[dict]:
-        """Hashtag affinitesi + virality + tazelik ile CBF."""
-        seen_ids = set(self.user_vectors.get(user_id, {}).keys())
-        candidates = [p for p in self.posts.values() if p.id not in seen_ids
-                      and p.user_id != user_id]
-
-        scored = []
-        for post in candidates:
-            freshness = self._freshness(post.created_at)
-            virality = min(post.virality_score / 100, 1.0)
-            score = freshness * 0.40 + virality * 0.60
-            scored.append((post, score))
-
-        scored.sort(key=lambda x: x[1], reverse=True)
-
-        results = []
-        for post, score in scored[:limit]:
-            author = self.users.get(post.user_id)
-            results.append({
-                "post_id": post.id[:8],
-                "author": author.username if author else "?",
-                "content": post.content[:60],
-                "score": round(score, 4),
-                "source": "content_based",
-                "reason": "İlgi alanlarınla eşleşiyor",
-            })
-        return results
-
-    def hybrid(self, user_id: str, limit: int = 5) -> list[dict]:
-        """CF + CBF + Popularity hibrit öneri."""
-        cf  = self.user_cf(user_id, limit=limit * 2)
-        cbf = self.content_based(user_id, limit=limit * 2)
-
-        cf_scores  = self._minmax({r["post_id"]: r["score"] for r in cf})
-        cbf_scores = self._minmax({r["post_id"]: r["score"] for r in cbf})
-
-        all_ids = set(cf_scores) | set(cbf_scores)
-        pop_scores = {
-            pid: min(self.posts.get(pid + "...", MockPost()).virality_score / 100, 1.0)
-            for pid in all_ids
-        }
-
-        hybrid = {
-            pid: (cf_scores.get(pid, 0) * 0.50
-                  + cbf_scores.get(pid, 0) * 0.35
-                  + pop_scores.get(pid, 0) * 0.15)
-            for pid in all_ids
-        }
-
-        top = sorted(hybrid.items(), key=lambda x: x[1], reverse=True)[:limit]
-        cf_ids  = {r["post_id"] for r in cf}
-        cbf_ids = {r["post_id"] for r in cbf}
-
-        results = []
-        for pid, score in top:
-            if pid in cf_ids and pid in cbf_ids:
-                source, reason = "hybrid", "Beğenilerin ve ilgilerin birleşti"
-            elif pid in cf_ids:
-                source, reason = "cf", "Takip ettiğin kişiler beğendi"
-            else:
-                source, reason = "cbf", "İlgi alanlarınla eşleşiyor"
-
-            # İlgili postu bul (kısa ID ile eşleşen)
-            full_post = next((p for p in self.posts.values() if p.id.startswith(pid)), None)
-            if not full_post:
-                continue
-            author = self.users.get(full_post.user_id)
-            results.append({
-                "post_id": pid,
-                "author": author.username if author else "?",
-                "content": full_post.content[:60],
-                "score": round(score, 4),
-                "source": source,
-                "reason": reason,
-            })
-        return results
-
-    def cold_start(self, limit: int = 5) -> list[dict]:
-        """Yeni kullanıcı için trending içerikler."""
-        cutoff = datetime.utcnow() - timedelta(hours=72)
-        recent = [p for p in self.posts.values() if p.created_at >= cutoff]
-
-        # Medya tipi başına en iyi 2
-        by_type: dict[str, list] = {}
-        for p in recent:
-            by_type.setdefault(p.media_type, []).append(p)
-        for mt in by_type:
-            by_type[mt].sort(key=lambda p: p.virality_score, reverse=True)
-
-        diverse = []
-        for mt, ps in by_type.items():
-            diverse.extend(ps[:2])
-        diverse.sort(key=lambda p: p.virality_score, reverse=True)
-
-        results = []
-        for post in diverse[:limit]:
-            author = self.users.get(post.user_id)
-            results.append({
-                "post_id": post.id[:8],
-                "author": author.username if author else "?",
-                "content": post.content[:60],
-                "score": round(min(post.virality_score / 100, 1.0), 4),
-                "source": "cold_start",
-                "reason": "Şu an trend olan içerikler",
-            })
-        return results
-
-
-# ════════════════════════════════════════════════════════════
-# ANALYTICS (mock)
-# ════════════════════════════════════════════════════════════
-
-class MockAnalyticsService:
-    def __init__(self, users, posts, interactions):
-        self.users = {u.id: u for u in users}
-        self.posts = {p.id: p for p in posts}
-        self.interactions = interactions
-
-    def engagement_summary(self) -> list[dict]:
-        """Kullanıcı başına engagement özeti."""
-        from collections import defaultdict
-        stats: dict[str, dict] = defaultdict(lambda: {
-            "likes": 0, "views": 0, "shares": 0, "comments": 0, "dwell_total": 0, "count": 0
-        })
-        post_to_user = {p.id: p.user_id for p in self.posts.values()}
-
-        for inter in self.interactions:
-            uid = post_to_user.get(inter.post_id)
-            if not uid:
-                continue
-            s = stats[uid]
-            s[inter.type + "s"] = s.get(inter.type + "s", 0) + 1
-            if inter.type == "view":
-                s["views"] += 1
-                s["dwell_total"] += inter.dwell_time_ms
-                s["count"] += 1
-
-        results = []
-        for uid, s in stats.items():
-            user = self.users.get(uid)
-            if not user:
-                continue
-            er = (s["likes"] + s.get("comments", 0) * 2 + s.get("shares", 0) * 3) / max(s["views"], 1) * 100
-            results.append({
-                "user_id": uid[:8],
-                "username": user.username,
-                "total_views": s["views"],
-                "total_likes": s["likes"],
-                "total_shares": s.get("shares", 0),
-                "engagement_rate_pct": round(er, 2),
-                "avg_dwell_ms": round(s["dwell_total"] / max(s["count"], 1), 0),
-            })
-        return sorted(results, key=lambda x: x["engagement_rate_pct"], reverse=True)
-
-    def churn_analysis(self) -> list[dict]:
-        """Basit churn analizi."""
-        results = []
-        now = datetime.utcnow()
-        for user in self.users.values():
-            days_inactive = (now - user.last_active_at).days
-            if days_inactive == 0:
-                label = "healthy"
-                risk = 0.05
-            elif days_inactive <= 2:
-                label = "declining"
-                risk = 0.3
-            elif days_inactive <= 4:
-                label = "at_risk"
-                risk = 0.65
-            else:
-                label = "churned"
-                risk = 0.9
-            results.append({
-                "username": user.username,
-                "days_inactive": days_inactive,
-                "churn_risk": round(risk, 3),
-                "label": label,
-            })
-        return sorted(results, key=lambda x: x["churn_risk"], reverse=True)
-
-    def influence_scores(self, follows) -> list[dict]:
-        """Basit etki skoru hesabı."""
-        direct: dict[str, float] = {}
-        for fol, fid, weight in follows:
-            direct[fid] = direct.get(fid, 0) + weight
-
-        results = []
-        for uid, score in sorted(direct.items(), key=lambda x: x[1], reverse=True)[:8]:
-            user = self.users.get(uid)
-            if user:
-                results.append({
-                    "username": user.username,
-                    "influence_score": round(score, 3),
-                    "follower_weight_sum": round(score, 3),
-                })
-        return results
-
-
-# ════════════════════════════════════════════════════════════
-# A/B TEST (mock)
-# ════════════════════════════════════════════════════════════
-
-class MockABTestService:
-    @staticmethod
-    def _z_to_p(z: float) -> float:
-        t = 1.0 / (1.0 + 0.2316419 * abs(z))
-        poly = sum(c * t**i for i, c in enumerate(
-            [0.319381530, -0.356563782, 1.781477937, -1.821255978, 1.330274429], 1
-        ))
-        return min(2 * poly * math.exp(-0.5 * z**2) / math.sqrt(2 * math.pi), 1.0)
-
-    def compare_models(self) -> dict:
-        """İki model sürümü karşılaştırması (simülasyon)."""
-        random.seed(99)
-        n_a, c_a = 1200, 144   # v1.0: CTR %12
-        n_b, c_b = 1150, 161   # v2.0: CTR %14
-
-        p_a = c_a / n_a
-        p_b = c_b / n_b
-        p_pool = (c_a + c_b) / (n_a + n_b)
-        std_err = math.sqrt(p_pool * (1 - p_pool) * (1/n_a + 1/n_b))
-        z = (p_b - p_a) / std_err
-        p_value = self._z_to_p(z)
-
-        return {
-            "version_a": "v1.0",
-            "version_b": "v2.0",
-            "n_a": n_a, "clicks_a": c_a, "ctr_a": f"{p_a*100:.2f}%",
-            "n_b": n_b, "clicks_b": c_b, "ctr_b": f"{p_b*100:.2f}%",
-            "ctr_lift": f"{(p_b - p_a)*100:+.2f}%",
-            "z_score": round(z, 4),
-            "p_value": round(p_value, 4),
-            "is_significant": p_value < 0.05,
-            "winner": "v2.0" if p_value < 0.05 and p_b > p_a else "Fark anlamlı değil",
-        }
-
-
-# ════════════════════════════════════════════════════════════
-# ANA DEMO
-# ════════════════════════════════════════════════════════════
-
-def print_section(title: str):
-    print(f"\n{'═'*60}")
-    print(f"  {title}")
-    print(f"{'═'*60}")
-
-def print_results(items: list, max_n: int = 5):
-    for i, item in enumerate(items[:max_n], 1):
-        if isinstance(item, dict):
-            parts = " | ".join(f"{k}={v}" for k, v in item.items())
-            print(f"  {i:2d}. {parts}")
-        else:
-            print(f"  {i:2d}. {item}")
-
-
-def main():
-    logger.info("Mock veri oluşturuluyor...")
-    users, posts, interactions, follows = generate_mock_data()
-    logger.info(
-        f"Oluşturuldu: {len(users)} kullanıcı, "
-        f"{len(posts)} post, {len(interactions)} etkileşim, "
-        f"{len(follows)} takip"
-    )
-
-    target_user = users[0]
-    engine = MockRecommendationEngine(users, posts, interactions, follows)
-    analytics = MockAnalyticsService(users, posts, interactions)
-    ab_test = MockABTestService()
-
-    # ── 1. Cold Start ──────────────────────────────────────
-    print_section("1. COLD START — Yeni Kullanıcı Önerileri")
-    cold = engine.cold_start(limit=4)
-    print_results(cold)
-
-    # ── 2. User-Based CF ──────────────────────────────────
-    print_section(f"2. USER-BASED CF — '{target_user.username}' için")
-    cf_recs = engine.user_cf(target_user.id, limit=4)
-    if cf_recs:
-        print_results(cf_recs)
-    else:
-        print("  (Yeterli komşu bulunamadı — cold start uygulandı)")
-
-    # ── 3. Content-Based ──────────────────────────────────
-    print_section(f"3. CONTENT-BASED — '{target_user.username}' için")
-    cbf_recs = engine.content_based(target_user.id, limit=4)
-    print_results(cbf_recs)
-
-    # ── 4. Hybrid ─────────────────────────────────────────
-    print_section(f"4. HYBRID — '{target_user.username}' için")
-    hybrid_recs = engine.hybrid(target_user.id, limit=5)
-    print_results(hybrid_recs)
-
-    # ── 5. Engagement Analizi ─────────────────────────────
-    print_section("5. ENGAGEMENT ANALİZİ — Top Kullanıcılar")
-    eng = analytics.engagement_summary()
-    print_results(eng, max_n=5)
-
-    # ── 6. Churn Analizi ──────────────────────────────────
-    print_section("6. CHURN ANALİZİ")
-    churn = analytics.churn_analysis()
-    emoji_map = {"churned": "💀", "at_risk": "⚠️", "declining": "📉", "healthy": "✅"}
-    for c in churn:
-        e = emoji_map.get(c["label"], "?")
-        print(f"  {e} {c['username']:20s} risk={c['churn_risk']:.3f} | "
-              f"inactive={c['days_inactive']}d | [{c['label']}]")
-
-    # ── 7. Network Etkisi ─────────────────────────────────
-    print_section("7. NETWORK ETKİ SKORLARI")
-    influence = analytics.influence_scores(follows)
-    for i, rec in enumerate(influence, 1):
-        print(f"  #{i:2d} {rec['username']:20s} influence={rec['influence_score']:.3f}")
-
-    # ── 8. A/B Test ───────────────────────────────────────
-    print_section("8. A/B TEST — Model Karşılaştırması")
-    ab = ab_test.compare_models()
-    print(f"  v1.0: {ab['n_a']} öneri, {ab['clicks_a']} tıklama → CTR {ab['ctr_a']}")
-    print(f"  v2.0: {ab['n_b']} öneri, {ab['clicks_b']} tıklama → CTR {ab['ctr_b']}")
-    print(f"  Lift: {ab['ctr_lift']}  |  z={ab['z_score']}  |  p={ab['p_value']}")
-    sig = "✅ İstatistiksel olarak ANLAMLI" if ab["is_significant"] else "⚠️ Anlamlı değil"
-    print(f"  {sig}  →  Kazanan: {ab['winner']}")
-
-    print(f"\n{'═'*60}")
-    print("  Demo tamamlandı.")
-    print(f"{'═'*60}\n")
-
-
-if __name__ == "__main__":
-    main()
+MIT License — dilediğiniz gibi kullanabilirsiniz.
