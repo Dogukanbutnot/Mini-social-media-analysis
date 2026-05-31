@@ -647,11 +647,6 @@ implicit>=0.7.0         # Üretim kalitesi ALS + BM25
 - [ ] Grafana dashboard (model monitoring)
 - [ ] Docker Compose ile tek komutla ayağa kalkma
 
----
-
-## 👤 Yazar
-
-Bu proje bir **AI Engineer** tarafından SQL + Python + ML becerilerini gerçek dünya problemleri üzerinde derinleştirmek amacıyla geliştirilmiştir.
 
 ---
 
